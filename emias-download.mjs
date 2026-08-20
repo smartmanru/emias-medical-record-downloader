@@ -255,11 +255,12 @@ function titleFromRow(text, fallback) {
     .filter((part) => !DATE_TEXT_RE.test(part))
     .filter((part) => !ignored.test(part))
     .filter((part) => !/^выписан\s*:|^действ(?:ует|овал)\b|^тип рецепта\s*:|^вид рецепта\s*:|^действующий$|^отпущен$|^получите до\b/i.test(part));
-  return parts.slice(0, 4).join(' — ') || fallback;
+  return parts.slice(0, 4).join(' - ') || fallback;
 }
 
 function safeName(value, maxLength = 165) {
   const clean = String(value || '')
+    .replace(/[—–−]/g, '-')
     .replace(/[<>:"/\\|?*\x00-\x1F]/g, ' ')
     .replace(/[. ]+$/g, '')
     .replace(/\s+/g, ' ')
@@ -331,7 +332,7 @@ async function saveState() {
 
 async function diagnose(label, error) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const base = `${stamp} — ${safeName(label, 70)}`;
+  const base = `${stamp} - ${safeName(label, 70)}`;
   log(`Ошибка в «${label}»: ${error.message}`);
   try {
     await page.screenshot({ path: path.join(DIAGNOSTICS_DIR, `${base}.png`), fullPage: true });
@@ -751,16 +752,17 @@ function rowControls(locator) {
 function categoryFolder(auditKey, category) {
   if (auditKey === 'hospitalizations') {
     const rawName = normalizeText(category)
-      .replace(/^госпитализаци[яи]\s*[—-]\s*/i, '')
+      .replace(/^госпитализаци[яи]\s*[—–-]\s*/i, '')
       .trim() || 'госпитализация';
     const readableName = safeName(rawName, 68);
-    return path.join(CATEGORY_FOLDERS.hospitalizations, `${readableName} — ${shortHash(rawName).slice(0, 6)}`);
+    return path.join(CATEGORY_FOLDERS.hospitalizations, `${readableName} - ${shortHash(rawName).slice(0, 6)}`);
   }
   return CATEGORY_FOLDERS[auditKey] || safeName(category || 'Прочие документы', 70);
 }
 
 async function organizeExistingFiles() {
   const moved = new Map();
+  let changedCount = 0;
   for (const record of state.records) {
     if (!record.file) continue;
     const oldRelative = record.file;
@@ -771,31 +773,46 @@ async function organizeExistingFiles() {
     const source = path.join(OUTPUT_DIR, oldRelative);
     const folder = categoryFolder(record.auditKey, record.category);
     const directory = path.join(OUTPUT_DIR, folder);
-    const currentFolder = path.dirname(oldRelative);
-    if (path.normalize(currentFolder).toLowerCase() === path.normalize(folder).toLowerCase()) continue;
     if (!fsSync.existsSync(source)) continue;
     await fs.mkdir(directory, { recursive: true });
     const parsed = path.parse(path.basename(oldRelative));
-    const targetBase = record.auditKey === 'hospitalizations'
-      ? `${safeName(`${record.date} — ${record.title}`, 105)}${parsed.ext || '.pdf'}`
-      : path.basename(oldRelative);
+    const targetStem = record.auditKey === 'hospitalizations'
+      ? safeName(`${record.date} - ${record.title}`, 105)
+      : safeName(`${record.date} - ${record.category} - ${record.title}`, 145);
+    const targetBase = `${targetStem}${parsed.ext || '.pdf'}`;
     const targetParsed = path.parse(targetBase);
+    const sameDirectory = path.normalize(path.dirname(source)).toLowerCase()
+      === path.normalize(directory).toLowerCase();
+    const currentStem = parsed.name.toLowerCase();
+    const desiredStem = targetStem.toLowerCase();
+    const numberedSuffix = currentStem.startsWith(`${desiredStem} - `)
+      && /^\d{2,}$/.test(currentStem.slice(desiredStem.length + 3));
+    const sameExtension = parsed.ext.toLowerCase() === targetParsed.ext.toLowerCase();
+    if (sameDirectory && sameExtension && (currentStem === desiredStem || numberedSuffix)) {
+      moved.set(oldRelative, oldRelative);
+      continue;
+    }
     let destination = path.join(directory, targetBase);
+    if (path.normalize(source).toLowerCase() === path.normalize(destination).toLowerCase()) {
+      moved.set(oldRelative, oldRelative);
+      continue;
+    }
     let suffix = 2;
     while (fsSync.existsSync(destination)) {
-      destination = path.join(directory, `${targetParsed.name} — ${String(suffix).padStart(2, '0')}${targetParsed.ext}`);
+      destination = path.join(directory, `${targetParsed.name} - ${String(suffix).padStart(2, '0')}${targetParsed.ext}`);
       suffix += 1;
     }
     await fs.rename(source, destination);
     const newRelative = path.relative(OUTPUT_DIR, destination);
     moved.set(oldRelative, newRelative);
+    changedCount += 1;
     record.file = newRelative;
   }
   for (const [hash, oldRelative] of Object.entries(state.hashes)) {
     if (moved.has(oldRelative)) state.hashes[hash] = moved.get(oldRelative);
   }
-  if (moved.size > 0) {
-    log(`Разложены по папкам ранее сохранённые файлы: ${moved.size}`);
+  if (changedCount > 0) {
+    log(`Разложены по папкам ранее сохранённые файлы: ${changedCount}`);
     await saveState();
   }
 }
@@ -806,13 +823,13 @@ async function uniqueDestination(meta, extension = '.pdf') {
   await fs.mkdir(directory, { recursive: true });
   const hospitalDocument = meta.auditKey === 'hospitalizations';
   const stem = safeName(
-    hospitalDocument ? `${meta.date} — ${meta.title}` : `${meta.date} — ${meta.category} — ${meta.title}`,
+    hospitalDocument ? `${meta.date} - ${meta.title}` : `${meta.date} - ${meta.category} - ${meta.title}`,
     hospitalDocument ? 105 : 145,
   );
   let candidate = path.join(directory, `${stem}${ext}`);
   let suffix = 2;
   while (fsSync.existsSync(candidate)) {
-    candidate = path.join(directory, `${stem} — ${String(suffix).padStart(2, '0')}${ext}`);
+    candidate = path.join(directory, `${stem} - ${String(suffix).padStart(2, '0')}${ext}`);
     suffix += 1;
   }
   return candidate;
@@ -1094,7 +1111,7 @@ async function processModal(meta, waitForAppearance = false) {
     await control.scrollIntoViewIfNeeded().catch(() => {});
     if (!(await waitForControlReady(control, 15_000))) continue;
     const controlText = normalizeText(await control.innerText().catch(() => 'вложение'));
-    const childMeta = { ...meta, title: safeName(`${meta.title} — ${controlText || 'вложение'}`) };
+    const childMeta = { ...meta, title: safeName(`${meta.title} - ${controlText || 'вложение'}`) };
     const captured = await captureClick(control);
     artifacts += await saveCapturedArtifacts(captured, childMeta, 'вложение из просмотра');
     if (ACTION_DELAY_MS > 0) await page.waitForTimeout(ACTION_DELAY_MS);
@@ -1129,7 +1146,7 @@ async function processModal(meta, waitForAppearance = false) {
       throw new Error('Кнопка загрузки в окне документа не вернула оригинальный файл.');
     }
     log('  Кнопка не вернула файл; сохраняю печатную копию окна.');
-    await savePagePdf(page, { ...meta, title: `${meta.title} — просмотр` }, 'печать окна просмотра');
+    await savePagePdf(page, { ...meta, title: `${meta.title} - просмотр` }, 'печать окна просмотра');
     artifacts += 1;
   }
   if (!(await closeModal(modal))) {
@@ -1163,7 +1180,7 @@ async function activateDocumentControl(control, meta, waitForModal, clickWaitMs 
       for (const popup of capturedLink.popups) artifacts += await savePopup(popup, meta);
     }
     if (artifacts === 0) {
-      await savePagePdf(page, { ...meta, title: `${meta.title} — просмотр` }, 'печать страницы просмотра');
+      await savePagePdf(page, { ...meta, title: `${meta.title} - просмотр` }, 'печать страницы просмотра');
       artifacts += 1;
     }
     await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
@@ -1261,7 +1278,7 @@ async function processCurrentDocumentPage(root, section, pageNumber) {
         if (error instanceof BrowserRestartNeeded) throw error;
         state.actions[actionKey] = { status: 'error', error: error.message, at: new Date().toISOString() };
         await saveState();
-        await diagnose(`${section.label} — ${title}`, error);
+        await diagnose(`${section.label} - ${title}`, error);
       }
     }
   }
@@ -1439,7 +1456,7 @@ async function processNestedChapters(root, section) {
       key: `${section.key}-chapter-${chapterIndex + 1}`,
       auditKey: section.key,
       trackRows: false,
-      label: `${section.label} — ${chapterLabel}`,
+      label: `${section.label} - ${chapterLabel}`,
     });
     totalRows += summary.rows;
     pagesSeen += summary.pages;
@@ -1630,7 +1647,7 @@ async function processHospitalizations() {
             key: `hospitalizations-${visitKey}`,
             auditKey: 'hospitalizations',
             trackRows: false,
-            label: safeName(`госпитализация — ${visitTitle}`, 90),
+            label: safeName(`госпитализация - ${visitTitle}`, 90),
             directDownload: true,
             actionVersion: hospitalActionVersion,
           };
@@ -1664,7 +1681,7 @@ async function processHospitalizations() {
           }
           state.visits[visitKey] = { status: 'error', error: error.message, pageNumber, rowIndex, at: new Date().toISOString() };
           await saveState();
-          await diagnose(`госпитализация — ${visitTitle}`, error);
+          await diagnose(`госпитализация - ${visitTitle}`, error);
           root = await openHospitalListPage(pageNumber);
           visitFinished = true;
         }
