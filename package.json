@@ -1,0 +1,13 @@
+{
+  "name": "emias-playwright-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node emias-download.mjs",
+    "check": "node --check emias-download.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.55.0"
+  }
+}
