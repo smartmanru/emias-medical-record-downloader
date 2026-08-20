@@ -878,6 +878,41 @@ async function savePagePdf(targetPage, meta, source) {
   return await finalizeTemporaryFile(tempPath, meta, source, '.pdf');
 }
 
+async function isDownloadControlStuck(control) {
+  return await control.evaluate((element) => {
+    const ariaBusy = element.getAttribute('aria-busy') === 'true';
+    const namedLoader = Boolean(element.querySelector(
+      '[class*="spinner" i], [class*="loader" i], [data-testid*="loader" i], [data-testid*="spinner" i]',
+    ));
+    const animated = [element, ...element.querySelectorAll('*')].some((candidate) => {
+      const style = window.getComputedStyle(candidate);
+      return style.animationName !== 'none' && style.animationPlayState === 'running';
+    });
+    const disabled = element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true';
+    const visibleModal = document.querySelector('.ReactModal__Overlay--after-open, [role="dialog"]');
+    const belongsToModal = Boolean(element.closest('.ReactModal__Overlay--after-open, [role="dialog"]'));
+    return ariaBusy || namedLoader || animated || (disabled && (!visibleModal || belongsToModal));
+  }).catch(() => false);
+}
+
+function capturedHasFile(captured) {
+  if (captured.downloads.length > 0 || captured.popups.length > 0) return true;
+  return captured.responses.some((response) => {
+    const headers = response.headers();
+    const contentType = headers['content-type'] || '';
+    const disposition = headers['content-disposition'] || '';
+    return /pdf|octet-stream/i.test(contentType) || /attachment|\.pdf/i.test(disposition);
+  });
+}
+
+async function reloadAfterStuckDownload() {
+  log('  Кнопка скачивания зависла; сохраняю состояние и перезагружаю страницу...');
+  await saveState();
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+  restartPending = true;
+  throw new BrowserRestartNeeded();
+}
+
 async function captureClick(control, waitMs = SETTLE_MS) {
   const downloads = [];
   const popups = [];
@@ -891,8 +926,18 @@ async function captureClick(control, waitMs = SETTLE_MS) {
   page.on('response', onResponse);
   context.on('page', onPage);
   try {
-    await control.click({ timeout: 12_000 });
+    if (await isDownloadControlStuck(control)) await reloadAfterStuckDownload();
+    try {
+      await control.click({ timeout: 12_000 });
+    } catch (error) {
+      if (await isDownloadControlStuck(control)) await reloadAfterStuckDownload();
+      throw error;
+    }
     await page.waitForTimeout(waitMs);
+    const captured = { downloads, popups, responses };
+    if (!capturedHasFile(captured) && await isDownloadControlStuck(control)) {
+      await reloadAfterStuckDownload();
+    }
   } finally {
     page.off('download', onDownload);
     page.off('response', onResponse);
